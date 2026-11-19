@@ -1,0 +1,12 @@
+:root { color-scheme: light dark; font: 16px/1.55 Inter, system-ui, sans-serif; }
+body { margin: 0; background: Canvas; color: CanvasText; }
+main { max-width: 46rem; margin: auto; padding: 1.5rem; }
+header, .ticket-heading { display: flex; gap: 1rem; justify-content: space-between; align-items: baseline; flex-wrap: wrap; }
+h1 { font-size: 1.65rem; margin: 0; }
+h2 { font-size: 1.1rem; margin: 0; }
+article { padding: 1rem 0; border-top: 1px solid color-mix(in srgb, CanvasText 20%, Canvas); }
+button { font: inherit; padding: .4rem .85rem; border-radius: .4rem; border: 1px solid currentColor; cursor: pointer; }
+.confirm { color: white; background: #176443; border-color: #176443; }
+button:disabled { opacity: .55; cursor: default; }
+p { margin: .65rem 0; }
+.details, #deployment { white-space: pre-wrap; overflow-wrap: anywhere; }

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>祀 · 工单验收</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="/api/plugin/page/bridge-sdk.js"></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>工单验收</h1>
+      <button id="refresh" type="button">刷新</button>
+    </header>
+    <p>检查工单结果并确认完成。全部确认后，到绑定私聊发送 <code>/反馈 部署</code> 一次性上线。</p>
+    <p id="deployment"></p>
+    <p id="status" role="status">正在读取工单…</p>
+    <section id="tickets" aria-label="已结束的工单"></section>
+  </main>
+</body>
+</html>

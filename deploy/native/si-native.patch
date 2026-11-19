@@ -1,0 +1,1242 @@
+diff --git a/.changeset/native-event-stream-wakeup.md b/.changeset/native-event-stream-wakeup.md
+new file mode 100644
+index 0000000..95d1c96
+--- /dev/null
++++ b/.changeset/native-event-stream-wakeup.md
+@@ -0,0 +1,6 @@
++---
++"@agent-wechat/cli": patch
++---
++
++Wake event streams after account event writes and replay pending pages immediately.
++Streams use cursors for recovery and check shutdown and token validity while idle.
+diff --git a/.changeset/wechat-image-decode-errors.md b/.changeset/wechat-image-decode-errors.md
+new file mode 100644
+index 0000000..cc07a48
+--- /dev/null
++++ b/.changeset/wechat-image-decode-errors.md
+@@ -0,0 +1,6 @@
++---
++"@agent-wechat/cli": patch
++"@agent-wechat/rust-crates": patch
++---
++
++Classify image decoding resource limits separately from invalid image data across JPEG, PNG, GIF and WebP inspection.
+diff --git a/.changeset/wechat-sticker-cdn.md b/.changeset/wechat-sticker-cdn.md
+new file mode 100644
+index 0000000..01d0b50
+--- /dev/null
++++ b/.changeset/wechat-sticker-cdn.md
+@@ -0,0 +1,6 @@
++---
++"@agent-wechat/cli": patch
++"@agent-wechat/rust-crates": patch
++---
++
++Accept incoming stickers from the Tencent CDN host `vweixinf.tc.qq.com`. Downloads still verify the address, length and checksum.
+diff --git a/docs/src/content/docs/use/api.mdx b/docs/src/content/docs/use/api.mdx
+index 19ee1c7..33ede46 100644
+--- a/docs/src/content/docs/use/api.mdx
++++ b/docs/src/content/docs/use/api.mdx
+@@ -253,6 +253,11 @@ A server-sent event stream. A new message arrives as a `message.committed` event
+ The stream sends an immediate heartbeat comment, followed by periodic keepalives.
+ Heartbeat comments contain no message and do not advance the event cursor.
+ 
++Committed events wake subscribers immediately. Pending pages replay consecutively.
++While idle, the daemon checks shutdown and token
++validity every 500 milliseconds. Each connection reads its account's saved event
++log after a notification, so reconnects and slow consumers resume from their cursor.
++
+ Recognized group changes emit `group.updated` after the saved profile changes; fetch `GET /groups/{groupId}` or its members. `group.refresh_blocked` means a follow-up read could not finish. These events share the same replayable stream. Automatic delivery of every edit made on another device is not established; see [group refresh limits](/use/groups/).
+ 
+ ## Routes
+diff --git a/packages/native-client-rust/Cargo.lock b/packages/native-client-rust/Cargo.lock
+index b6c7a29..ec84382 100644
+--- a/packages/native-client-rust/Cargo.lock
++++ b/packages/native-client-rust/Cargo.lock
+@@ -3015,6 +3015,7 @@ dependencies = [
+  "serde_json",
+  "sha2",
+  "tempfile",
++ "tokio",
+  "ts-rs",
+  "uuid",
+  "wechat-media",
+diff --git a/packages/native-client-rust/crates/wechat-api/src/lib.rs b/packages/native-client-rust/crates/wechat-api/src/lib.rs
+index 8914454..d76501c 100644
+--- a/packages/native-client-rust/crates/wechat-api/src/lib.rs
++++ b/packages/native-client-rust/crates/wechat-api/src/lib.rs
+@@ -1114,14 +1114,59 @@ async fn stream(
+     c.require(Some(&a), "read")?;
+     let last = headers.get("last-event-id").and_then(|v| v.to_str().ok());
+     let mut after = decimal(q.after.as_deref().or(last))?;
++    let mut changes = app.core.store.subscribe_events(&a)?;
+     app.core.store.events(&a, after, 1)?;
+     let events = async_stream::stream! {
+         yield Ok::<_,std::convert::Infallible>(Event::default().comment("connected"));
+-        loop {
+-        if app.core.stopping.load(std::sync::atomic::Ordering::SeqCst)||!c.valid(&app.core.store){break;}
+-        match app.core.store.events(&a,after,100){Ok(items)=>for item in items {after=item.cursor.parse().unwrap_or(after);yield Ok::<_,std::convert::Infallible>(Event::default().id(&item.cursor).json_data(&item).expect("serializable event"));},Err(_)=>{yield Ok(Event::default().event("error").data("{\"error\":{\"code\":\"event_cursor_expired\"}}"));break;}}
+-        tokio::time::sleep(Duration::from_millis(500)).await;
+-    }};
++        'stream: loop {
++            if app.core.stopping.load(std::sync::atomic::Ordering::SeqCst)
++                || !c.valid(&app.core.store)
++            {
++                break;
++            }
++            // Mark before reading so a commit racing the empty query remains
++            // visible to changed(). The durable cursor supplies the payloads.
++            drop(changes.borrow_and_update());
++            let items = match app.core.store.events(&a, after, 100) {
++                Ok(items) => items,
++                Err(_) => {
++                    yield Ok(Event::default().event("error").data(
++                        "{\"error\":{\"code\":\"event_cursor_expired\"}}"
++                    ));
++                    break;
++                }
++            };
++            if !items.is_empty() {
++                for item in items {
++                    after = item.cursor.parse().unwrap_or(after);
++                    yield Ok(Event::default()
++                        .id(&item.cursor)
++                        .json_data(&item)
++                        .expect("serializable event"));
++                }
++                continue;
++            }
++            loop {
++                match tokio::time::timeout(Duration::from_millis(500), changes.changed()).await {
++                    Ok(Ok(())) => break,
++                    Ok(Err(_)) => {
++                        yield Ok(Event::default().event("error").data(
++                            "{\"error\":{\"code\":\"event_cursor_expired\"}}"
++                        ));
++                        break 'stream;
++                    }
++                    Err(_) => {
++                        // Idle timers check shutdown and token validity.
++                        if app.core.stopping.load(std::sync::atomic::Ordering::SeqCst)
++                            || !c.valid(&app.core.store)
++                        {
++                            break 'stream;
++                        }
++                    }
++                }
++            }
++        }
++    };
+     Ok(Sse::new(events)
+         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+         .into_response())
+diff --git a/packages/native-client-rust/crates/wechat-media/src/image.rs b/packages/native-client-rust/crates/wechat-media/src/image.rs
+index 95b47a5..0012083 100644
+--- a/packages/native-client-rust/crates/wechat-media/src/image.rs
++++ b/packages/native-client-rust/crates/wechat-media/src/image.rs
+@@ -1,437 +1,449 @@
+-use anyhow::{ensure, Result};
+-use image::{AnimationDecoder, ImageDecoder};
+-use serde::{Deserialize, Serialize};
+-use std::io::Cursor;
+-
+-#[derive(Clone, Serialize, Deserialize, Debug)]
+-pub struct ImageInspection {
+-    pub content_type: String,
+-    pub width: u32,
+-    pub height: u32,
+-    pub frames: u32,
+-    pub animation_preserved: bool,
+-}
+-
+-// JPEG segments can contain marker-shaped bytes, and scan data escapes them.
+-// Walk the framing so an EOI inside metadata cannot disguise truncation. Bytes
+-// after the actual EOI are permitted; received photos can include a trailer.
+-fn jpeg_has_end_marker(bytes: &[u8]) -> bool {
+-    if !bytes.starts_with(&[0xff, 0xd8]) {
+-        return false;
+-    }
+-    let mut position = 2;
+-    let mut in_scan = false;
+-    let mut saw_scan = false;
+-    while position < bytes.len() {
+-        if in_scan {
+-            while bytes.get(position).is_some_and(|b| *b != 0xff) {
+-                position += 1;
+-            }
+-        }
+-        if bytes.get(position) != Some(&0xff) {
+-            return false;
+-        }
+-        while bytes.get(position) == Some(&0xff) {
+-            position += 1;
+-        }
+-        let Some(&marker) = bytes.get(position) else {
+-            return false;
+-        };
+-        position += 1;
+-        match marker {
+-            0x00 | 0xd0..=0xd7 if in_scan => continue,
+-            0xd9 => return saw_scan,
+-            0x00 | 0xd0..=0xd8 => return false,
+-            0x01 => continue,
+-            _ => {
+-                let Some(length) = bytes.get(position..position + 2) else {
+-                    return false;
+-                };
+-                let length = u16::from_be_bytes([length[0], length[1]]) as usize;
+-                if length < 2 || position + length > bytes.len() {
+-                    return false;
+-                }
+-                position += length;
+-                if marker == 0xda {
+-                    saw_scan = true;
+-                    in_scan = true;
+-                } else if marker != 0xdc {
+-                    in_scan = false;
+-                }
+-            }
+-        }
+-    }
+-    false
+-}
+-
+-fn gif_sub_blocks_end(bytes: &[u8], mut position: usize) -> Option<usize> {
+-    loop {
+-        let length = *bytes.get(position)? as usize;
+-        position = position.checked_add(1 + length)?;
+-        if position > bytes.len() {
+-            return None;
+-        }
+-        if length == 0 {
+-            return Some(position);
+-        }
+-    }
+-}
+-
+-// A ';' inside a palette, extension or compressed frame is not the trailer.
+-// Follow block lengths; any bytes after the actual trailer stay in the source.
+-fn gif_has_trailer(bytes: &[u8]) -> bool {
+-    if bytes.len() < 13 || ![b"GIF87a", b"GIF89a"].iter().any(|h| bytes.starts_with(*h)) {
+-        return false;
+-    }
+-    let palette_size = |packed: u8| {
+-        if packed & 0x80 != 0 {
+-            3 * (2usize << (packed & 7))
+-        } else {
+-            0
+-        }
+-    };
+-    let mut position = 13 + palette_size(bytes[10]);
+-    while let Some(&block) = bytes.get(position) {
+-        position += 1;
+-        match block {
+-            0x3b => return true,
+-            0x21 => {
+-                if bytes.get(position).is_none() {
+-                    return false;
+-                }
+-                position += 1; // Extension label; its contents use sub-blocks.
+-            }
+-            0x2c => {
+-                let Some(descriptor) = bytes.get(position..position + 9) else {
+-                    return false;
+-                };
+-                position += 9 + palette_size(descriptor[8]);
+-                if bytes.get(position).is_none() {
+-                    return false;
+-                }
+-                position += 1; // LZW minimum code size, before data sub-blocks.
+-            }
+-            _ => return false,
+-        }
+-        let Some(end) = gif_sub_blocks_end(bytes, position) else {
+-            return false;
+-        };
+-        position = end;
+-    }
+-    false
+-}
+-
+-fn png_has_end_chunk(bytes: &[u8]) -> bool {
+-    if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+-        return false;
+-    }
+-    let mut position: usize = 8;
+-    while let Some(header) = bytes.get(position..position + 8) {
+-        let length = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
+-        let Some(end) = position.checked_add(12).and_then(|n| n.checked_add(length)) else {
+-            return false;
+-        };
+-        if end > bytes.len() {
+-            return false;
+-        }
+-        if &header[4..8] == b"IEND" {
+-            // The decoder can finish the pixels before consuming IEND. Require
+-            // its zero-length chunk and fixed CRC without trimming the source.
+-            return length == 0 && bytes[end - 4..end] == [0xae, 0x42, 0x60, 0x82];
+-        }
+-        position = end;
+-    }
+-    false
+-}
+-
+-pub(crate) fn inspect_standard_image(bytes: &[u8]) -> Result<ImageInspection> {
+-    ensure!(
+-        !bytes.is_empty() && bytes.len() <= 16 * 1024 * 1024,
+-        "image_size_limit"
+-    );
+-    let format =
+-        image::guess_format(bytes).map_err(|_| anyhow::anyhow!("image_format_unsupported"))?;
+-    let limits = || {
+-        let mut l = image::Limits::default();
+-        l.max_image_width = Some(4096);
+-        l.max_image_height = Some(4096);
+-        l.max_alloc = Some(64 * 1024 * 1024);
+-        l
+-    };
+-    let mut frames = 0u32;
+-    let mut total = 0u64;
+-    let mut width = 0;
+-    let mut height = 0;
+-    let mut count = |frame: image::ImageResult<image::Frame>| -> Result<()> {
+-        let f = frame.map_err(|_| anyhow::anyhow!("image_decode_failed"))?;
+-        let (w, h) = f.buffer().dimensions();
+-        ensure!(
+-            w > 0 && h > 0 && w as u64 * h as u64 <= 4_000_000,
+-            "image_decode_limit"
+-        );
+-        total += w as u64 * h as u64;
+-        frames += 1;
+-        ensure!(frames <= 500 && total <= 100_000_000, "image_decode_limit");
+-        width = width.max(w);
+-        height = height.max(h);
+-        Ok(())
+-    };
+-    let mime = match format {
+-        image::ImageFormat::Gif => {
+-            ensure!(gif_has_trailer(bytes), "gif_trailer_missing");
+-            let mut decoder = image::codecs::gif::GifDecoder::new(Cursor::new(bytes))?;
+-            decoder.set_limits(limits())?;
+-            for frame in decoder.into_frames() {
+-                count(frame)?;
+-            }
+-            "image/gif"
+-        }
+-        image::ImageFormat::WebP => {
+-            let encoded_length = bytes
+-                .get(4..8)
+-                .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as u64 + 8)
+-                .and_then(|n| usize::try_from(n).ok())
+-                .filter(|n| *n >= 12 && *n <= bytes.len())
+-                .ok_or_else(|| anyhow::anyhow!("webp_length_invalid"))?;
+-            // The RIFF boundary limits decoding, not the retained source bytes.
+-            // https://developers.google.com/speed/webp/docs/riff_container
+-            ensure!(encoded_length % 2 == 0, "webp_length_invalid");
+-            let mut decoder =
+-                image::codecs::webp::WebPDecoder::new(Cursor::new(&bytes[..encoded_length]))?;
+-            decoder.set_limits(limits())?;
+-            if decoder.has_animation() {
+-                for frame in decoder.into_frames() {
+-                    count(frame)?;
+-                }
+-            } else {
+-                let (w, h) = decoder.dimensions();
+-                ensure!(
+-                    w > 0 && h > 0 && w as u64 * h as u64 <= 4_000_000,
+-                    "image_decode_limit"
+-                );
+-                image::DynamicImage::from_decoder(decoder)
+-                    .map_err(|_| anyhow::anyhow!("image_decode_failed"))?;
+-                width = w;
+-                height = h;
+-                frames = 1;
+-            }
+-            "image/webp"
+-        }
+-        image::ImageFormat::Jpeg | image::ImageFormat::Png => {
+-            if format == image::ImageFormat::Jpeg {
+-                ensure!(jpeg_has_end_marker(bytes), "jpeg_trailer_missing");
+-            } else {
+-                ensure!(png_has_end_chunk(bytes), "png_trailer_missing");
+-            }
+-            let mut reader = image::ImageReader::with_format(Cursor::new(bytes), format);
+-            reader.limits(limits());
+-            let decoded = reader
+-                .decode()
+-                .map_err(|_| anyhow::anyhow!("image_decode_failed"))?;
+-            width = decoded.width();
+-            height = decoded.height();
+-            ensure!(
+-                width > 0 && height > 0 && width as u64 * height as u64 <= 16_777_216,
+-                "image_decode_limit"
+-            );
+-            frames = 1;
+-            if format == image::ImageFormat::Png {
+-                "image/png"
+-            } else {
+-                "image/jpeg"
+-            }
+-        }
+-        _ => anyhow::bail!("image_format_unsupported"),
+-    };
+-    ensure!(frames > 0, "image_no_frames");
+-    Ok(ImageInspection {
+-        content_type: mime.into(),
+-        width,
+-        height,
+-        frames,
+-        animation_preserved: frames > 1,
+-    })
+-}
+-
+-#[cfg(test)]
+-mod tests {
+-    use super::*;
+-    use crate::inspect_image;
+-    #[test]
+-    fn png_is_fully_decoded_and_truncation_fails() {
+-        let mut bytes = std::io::Cursor::new(vec![]);
+-        image::DynamicImage::new_rgb8(8, 8)
+-            .write_to(&mut bytes, image::ImageFormat::Png)
+-            .unwrap();
+-        let good = bytes.into_inner();
+-        assert_eq!(inspect_image(&good).unwrap().frames, 1);
+-        for length in [20, good.len() - 12, good.len() - 1] {
+-            assert!(
+-                inspect_image(&good[..length]).is_err(),
+-                "accepted PNG truncated to {length}"
+-            );
+-        }
+-        let mut missing_end = good[..good.len() - 12].to_vec();
+-        missing_end.extend_from_slice(&12u32.to_be_bytes());
+-        missing_end.extend_from_slice(b"tEXt");
+-        missing_end.extend_from_slice(&good[good.len() - 12..]);
+-        missing_end.extend_from_slice(&[0; 4]);
+-        assert_eq!(
+-            inspect_image(&missing_end).unwrap_err().to_string(),
+-            "png_trailer_missing"
+-        );
+-    }
+-
+-    fn still_image(format: image::ImageFormat) -> Vec<u8> {
+-        let mut out = Cursor::new(Vec::new());
+-        image::DynamicImage::new_rgb8(8, 8)
+-            .write_to(&mut out, format)
+-            .unwrap();
+-        out.into_inner()
+-    }
+-
+-    #[test]
+-    fn non_jpeg_images_with_appended_data_retain_source_bytes() {
+-        for (format, mime) in [
+-            (image::ImageFormat::Png, "image/png"),
+-            (image::ImageFormat::Gif, "image/gif"),
+-            (image::ImageFormat::WebP, "image/webp"),
+-        ] {
+-            let mut bytes = still_image(format);
+-            bytes.extend_from_slice(b"synthetic-opaque-trailer!");
+-            let original = bytes.clone();
+-            let inspection = inspect_image(&bytes).unwrap_or_else(|e| panic!("{format:?}: {e}"));
+-            assert_eq!(inspection.content_type, mime);
+-            assert_eq!((inspection.width, inspection.height), (8, 8));
+-            assert_eq!(bytes, original);
+-        }
+-    }
+-
+-    #[test]
+-    fn webp_declared_boundary_cannot_use_bytes_outside_riff() {
+-        let good = still_image(image::ImageFormat::WebP);
+-        assert_eq!(inspect_image(&good).unwrap().content_type, "image/webp");
+-        assert!(inspect_image(&good[..good.len() - 1]).is_err());
+-        let mut short_boundary = good;
+-        short_boundary[4..8].copy_from_slice(&4u32.to_le_bytes());
+-        assert!(inspect_image(&short_boundary).is_err());
+-        short_boundary[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+-        assert!(inspect_image(&short_boundary).is_err());
+-    }
+-
+-    #[test]
+-    fn animated_webp_keeps_all_frames_with_appended_data() {
+-        let mut bytes = include_bytes!("../tests/fixtures/two-frame.webp").to_vec();
+-        let plain = inspect_image(&bytes).unwrap();
+-        assert_eq!(plain.frames, 2);
+-        assert!(plain.animation_preserved);
+-        bytes.extend_from_slice(b"extra-source-data");
+-        let original = bytes.clone();
+-        let inspected = inspect_image(&bytes).unwrap();
+-        assert_eq!(inspected.frames, 2);
+-        assert_eq!((inspected.width, inspected.height), (12, 8));
+-        assert!(inspected.animation_preserved);
+-        assert_eq!(bytes, original);
+-    }
+-
+-    #[test]
+-    fn gif_animation_and_real_trailer_are_checked_separately() {
+-        let mut bytes = Vec::new();
+-        {
+-            let mut encoder = image::codecs::gif::GifEncoder::new(&mut bytes);
+-            encoder
+-                .encode_frames([
+-                    image::Frame::new(image::RgbaImage::from_pixel(
+-                        8,
+-                        8,
+-                        image::Rgba([0, 0, 0, 255]),
+-                    )),
+-                    image::Frame::new(image::RgbaImage::from_pixel(
+-                        8,
+-                        8,
+-                        image::Rgba([255, 0, 0, 255]),
+-                    )),
+-                ])
+-                .unwrap();
+-        }
+-        let complete_length = bytes.len();
+-        assert_eq!(bytes.last(), Some(&b';'));
+-        bytes.extend_from_slice(b"opaque-appended-data");
+-        let result = inspect_image(&bytes).unwrap();
+-        assert_eq!(result.frames, 2);
+-        assert!(result.animation_preserved);
+-
+-        // A marker-shaped byte in a comment is not the stream's trailer.
+-        let mut missing_trailer = bytes[..complete_length - 1].to_vec();
+-        missing_trailer.extend_from_slice(&[0x21, 0xfe, 1, b';', 0]);
+-        assert_eq!(
+-            inspect_image(&missing_trailer).unwrap_err().to_string(),
+-            "gif_trailer_missing"
+-        );
+-        // A truncated comment cannot be skipped just because it contains ';'.
+-        missing_trailer.truncate(missing_trailer.len() - 1);
+-        assert!(inspect_image(&missing_trailer).is_err());
+-    }
+-
+-    fn jpeg() -> Vec<u8> {
+-        let mut bytes = Cursor::new(vec![]);
+-        image::DynamicImage::new_rgb8(8, 8)
+-            .write_to(&mut bytes, image::ImageFormat::Jpeg)
+-            .unwrap();
+-        bytes.into_inner()
+-    }
+-
+-    #[test]
+-    fn jpeg_with_trailing_data_decodes_without_changing_source_bytes() {
+-        let mut bytes = jpeg();
+-        let checksum = <md5::Md5 as md5::Digest>::digest(&bytes);
+-        bytes.extend_from_slice(&0x12345678u64.to_le_bytes());
+-        bytes.extend_from_slice(&checksum);
+-        let original = bytes.clone();
+-        let inspected = inspect_image(&bytes).unwrap();
+-        assert_eq!(inspected.content_type, "image/jpeg");
+-        assert_eq!(
+-            (inspected.width, inspected.height, inspected.frames),
+-            (8, 8, 1)
+-        );
+-        assert_eq!(bytes, original);
+-    }
+-
+-    #[test]
+-    fn progressive_jpeg_multiple_scans_allow_trailing_data() {
+-        let mut bytes = include_bytes!("../tests/fixtures/progressive.jpg").to_vec();
+-        bytes.extend_from_slice(b"synthetic-photo-trailer!");
+-        let inspected = inspect_image(&bytes).unwrap();
+-        assert_eq!((inspected.width, inspected.height), (16, 12));
+-        assert_eq!(inspected.content_type, "image/jpeg");
+-        let end = bytes.len() - 24 - 2;
+-        assert!(!jpeg_has_end_marker(&bytes[..end]));
+-    }
+-
+-    #[test]
+-    fn jpeg_end_marker_inside_metadata_does_not_hide_truncation() {
+-        let image = jpeg();
+-        let mut bytes = vec![0xff, 0xd8, 0xff, 0xfe, 0, 6, 0x11, 0xff, 0xd9, 0x22];
+-        bytes.extend_from_slice(&image[2..]);
+-        assert!(inspect_image(&bytes).is_ok());
+-        bytes.truncate(bytes.len() - 2);
+-        assert_eq!(
+-            inspect_image(&bytes).unwrap_err().to_string(),
+-            "jpeg_trailer_missing"
+-        );
+-        bytes[4..6].copy_from_slice(&u16::MAX.to_be_bytes());
+-        bytes.extend_from_slice(&[0xff, 0xd9]);
+-        assert!(!jpeg_has_end_marker(&bytes));
+-    }
+-
+-    #[test]
+-    fn jpeg_scan_stuffing_and_restart_markers_are_not_end_markers() {
+-        let bytes = [
+-            0xff, 0xd8, 0xff, 0xda, 0, 2, 7, 0xff, 0, 0xd9, 0xff, 0xd0, 9, 0xff,
+-        ];
+-        assert!(!jpeg_has_end_marker(&bytes));
+-        let mut complete = bytes.to_vec();
+-        complete.push(0xd9);
+-        assert!(jpeg_has_end_marker(&complete));
+-    }
+-}
++use anyhow::{ensure, Result};
++use image::{AnimationDecoder, ImageDecoder};
++use serde::{Deserialize, Serialize};
++use std::io::Cursor;
++
++#[derive(Clone, Serialize, Deserialize, Debug)]
++pub struct ImageInspection {
++    pub content_type: String,
++    pub width: u32,
++    pub height: u32,
++    pub frames: u32,
++    pub animation_preserved: bool,
++}
++
++// JPEG segments can contain marker-shaped bytes, and scan data escapes them.
++// Walk the framing so an EOI inside metadata cannot disguise truncation. Bytes
++// after the actual EOI are permitted; received photos can include a trailer.
++fn jpeg_has_end_marker(bytes: &[u8]) -> bool {
++    if !bytes.starts_with(&[0xff, 0xd8]) {
++        return false;
++    }
++    let mut position = 2;
++    let mut in_scan = false;
++    let mut saw_scan = false;
++    while position < bytes.len() {
++        if in_scan {
++            while bytes.get(position).is_some_and(|b| *b != 0xff) {
++                position += 1;
++            }
++        }
++        if bytes.get(position) != Some(&0xff) {
++            return false;
++        }
++        while bytes.get(position) == Some(&0xff) {
++            position += 1;
++        }
++        let Some(&marker) = bytes.get(position) else {
++            return false;
++        };
++        position += 1;
++        match marker {
++            0x00 | 0xd0..=0xd7 if in_scan => continue,
++            0xd9 => return saw_scan,
++            0x00 | 0xd0..=0xd8 => return false,
++            0x01 => continue,
++            _ => {
++                let Some(length) = bytes.get(position..position + 2) else {
++                    return false;
++                };
++                let length = u16::from_be_bytes([length[0], length[1]]) as usize;
++                if length < 2 || position + length > bytes.len() {
++                    return false;
++                }
++                position += length;
++                if marker == 0xda {
++                    saw_scan = true;
++                    in_scan = true;
++                } else if marker != 0xdc {
++                    in_scan = false;
++                }
++            }
++        }
++    }
++    false
++}
++
++fn gif_sub_blocks_end(bytes: &[u8], mut position: usize) -> Option<usize> {
++    loop {
++        let length = *bytes.get(position)? as usize;
++        position = position.checked_add(1 + length)?;
++        if position > bytes.len() {
++            return None;
++        }
++        if length == 0 {
++            return Some(position);
++        }
++    }
++}
++
++// A ';' inside a palette, extension or compressed frame is not the trailer.
++// Follow block lengths; any bytes after the actual trailer stay in the source.
++fn gif_has_trailer(bytes: &[u8]) -> bool {
++    if bytes.len() < 13 || ![b"GIF87a", b"GIF89a"].iter().any(|h| bytes.starts_with(*h)) {
++        return false;
++    }
++    let palette_size = |packed: u8| {
++        if packed & 0x80 != 0 {
++            3 * (2usize << (packed & 7))
++        } else {
++            0
++        }
++    };
++    let mut position = 13 + palette_size(bytes[10]);
++    while let Some(&block) = bytes.get(position) {
++        position += 1;
++        match block {
++            0x3b => return true,
++            0x21 => {
++                if bytes.get(position).is_none() {
++                    return false;
++                }
++                position += 1; // Extension label; its contents use sub-blocks.
++            }
++            0x2c => {
++                let Some(descriptor) = bytes.get(position..position + 9) else {
++                    return false;
++                };
++                position += 9 + palette_size(descriptor[8]);
++                if bytes.get(position).is_none() {
++                    return false;
++                }
++                position += 1; // LZW minimum code size, before data sub-blocks.
++            }
++            _ => return false,
++        }
++        let Some(end) = gif_sub_blocks_end(bytes, position) else {
++            return false;
++        };
++        position = end;
++    }
++    false
++}
++
++fn png_has_end_chunk(bytes: &[u8]) -> bool {
++    if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
++        return false;
++    }
++    let mut position: usize = 8;
++    while let Some(header) = bytes.get(position..position + 8) {
++        let length = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
++        let Some(end) = position.checked_add(12).and_then(|n| n.checked_add(length)) else {
++            return false;
++        };
++        if end > bytes.len() {
++            return false;
++        }
++        if &header[4..8] == b"IEND" {
++            // The decoder can finish the pixels before consuming IEND. Require
++            // its zero-length chunk and fixed CRC without trimming the source.
++            return length == 0 && bytes[end - 4..end] == [0xae, 0x42, 0x60, 0x82];
++        }
++        position = end;
++    }
++    false
++}
++
++// Keep resource limits distinct from invalid encoded pixels. Do not surface
++// decoder messages here: those messages can contain untrusted source details.
++fn image_decode_error(error: image::ImageError) -> anyhow::Error {
++    match error {
++        image::ImageError::Limits(_) => anyhow::anyhow!("image_decode_limit"),
++        image::ImageError::Unsupported(_) => anyhow::anyhow!("image_format_unsupported"),
++        _ => anyhow::anyhow!("image_decode_failed"),
++    }
++}
++
++pub(crate) fn inspect_standard_image(bytes: &[u8]) -> Result<ImageInspection> {
++    ensure!(
++        !bytes.is_empty() && bytes.len() <= 16 * 1024 * 1024,
++        "image_size_limit"
++    );
++    let format =
++        image::guess_format(bytes).map_err(|_| anyhow::anyhow!("image_format_unsupported"))?;
++    let limits = || {
++        let mut l = image::Limits::default();
++        l.max_image_width = Some(4096);
++        l.max_image_height = Some(4096);
++        l.max_alloc = Some(64 * 1024 * 1024);
++        l
++    };
++    let mut frames = 0u32;
++    let mut total = 0u64;
++    let mut width = 0;
++    let mut height = 0;
++    let mut count = |frame: image::ImageResult<image::Frame>| -> Result<()> {
++        let f = frame.map_err(image_decode_error)?;
++        let (w, h) = f.buffer().dimensions();
++        ensure!(
++            w > 0 && h > 0 && w as u64 * h as u64 <= 4_000_000,
++            "image_decode_limit"
++        );
++        total += w as u64 * h as u64;
++        frames += 1;
++        ensure!(frames <= 500 && total <= 100_000_000, "image_decode_limit");
++        width = width.max(w);
++        height = height.max(h);
++        Ok(())
++    };
++    let mime = match format {
++        image::ImageFormat::Gif => {
++            ensure!(gif_has_trailer(bytes), "gif_trailer_missing");
++            let mut decoder = image::codecs::gif::GifDecoder::new(Cursor::new(bytes))
++                .map_err(image_decode_error)?;
++            decoder.set_limits(limits()).map_err(image_decode_error)?;
++            for frame in decoder.into_frames() {
++                count(frame)?;
++            }
++            "image/gif"
++        }
++        image::ImageFormat::WebP => {
++            let encoded_length = bytes
++                .get(4..8)
++                .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as u64 + 8)
++                .and_then(|n| usize::try_from(n).ok())
++                .filter(|n| *n >= 12 && *n <= bytes.len())
++                .ok_or_else(|| anyhow::anyhow!("webp_length_invalid"))?;
++            // The RIFF boundary limits decoding, not the retained source bytes.
++            // https://developers.google.com/speed/webp/docs/riff_container
++            ensure!(encoded_length % 2 == 0, "webp_length_invalid");
++            let mut decoder =
++                image::codecs::webp::WebPDecoder::new(Cursor::new(&bytes[..encoded_length]))
++                    .map_err(image_decode_error)?;
++            decoder.set_limits(limits()).map_err(image_decode_error)?;
++            if decoder.has_animation() {
++                for frame in decoder.into_frames() {
++                    count(frame)?;
++                }
++            } else {
++                let (w, h) = decoder.dimensions();
++                ensure!(
++                    w > 0 && h > 0 && w as u64 * h as u64 <= 4_000_000,
++                    "image_decode_limit"
++                );
++                image::DynamicImage::from_decoder(decoder)
++                    .map_err(image_decode_error)?;
++                width = w;
++                height = h;
++                frames = 1;
++            }
++            "image/webp"
++        }
++        image::ImageFormat::Jpeg | image::ImageFormat::Png => {
++            if format == image::ImageFormat::Jpeg {
++                ensure!(jpeg_has_end_marker(bytes), "jpeg_trailer_missing");
++            } else {
++                ensure!(png_has_end_chunk(bytes), "png_trailer_missing");
++            }
++            let mut reader = image::ImageReader::with_format(Cursor::new(bytes), format);
++            reader.limits(limits());
++            let decoded = reader
++                .decode()
++                .map_err(image_decode_error)?;
++            width = decoded.width();
++            height = decoded.height();
++            ensure!(
++                width > 0 && height > 0 && width as u64 * height as u64 <= 16_777_216,
++                "image_decode_limit"
++            );
++            frames = 1;
++            if format == image::ImageFormat::Png {
++                "image/png"
++            } else {
++                "image/jpeg"
++            }
++        }
++        _ => anyhow::bail!("image_format_unsupported"),
++    };
++    ensure!(frames > 0, "image_no_frames");
++    Ok(ImageInspection {
++        content_type: mime.into(),
++        width,
++        height,
++        frames,
++        animation_preserved: frames > 1,
++    })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::inspect_image;
++    #[test]
++    fn png_is_fully_decoded_and_truncation_fails() {
++        let mut bytes = std::io::Cursor::new(vec![]);
++        image::DynamicImage::new_rgb8(8, 8)
++            .write_to(&mut bytes, image::ImageFormat::Png)
++            .unwrap();
++        let good = bytes.into_inner();
++        assert_eq!(inspect_image(&good).unwrap().frames, 1);
++        for length in [20, good.len() - 12, good.len() - 1] {
++            assert!(
++                inspect_image(&good[..length]).is_err(),
++                "accepted PNG truncated to {length}"
++            );
++        }
++        let mut missing_end = good[..good.len() - 12].to_vec();
++        missing_end.extend_from_slice(&12u32.to_be_bytes());
++        missing_end.extend_from_slice(b"tEXt");
++        missing_end.extend_from_slice(&good[good.len() - 12..]);
++        missing_end.extend_from_slice(&[0; 4]);
++        assert_eq!(
++            inspect_image(&missing_end).unwrap_err().to_string(),
++            "png_trailer_missing"
++        );
++    }
++
++    fn still_image(format: image::ImageFormat) -> Vec<u8> {
++        let mut out = Cursor::new(Vec::new());
++        image::DynamicImage::new_rgb8(8, 8)
++            .write_to(&mut out, format)
++            .unwrap();
++        out.into_inner()
++    }
++
++    #[test]
++    fn non_jpeg_images_with_appended_data_retain_source_bytes() {
++        for (format, mime) in [
++            (image::ImageFormat::Png, "image/png"),
++            (image::ImageFormat::Gif, "image/gif"),
++            (image::ImageFormat::WebP, "image/webp"),
++        ] {
++            let mut bytes = still_image(format);
++            bytes.extend_from_slice(b"synthetic-opaque-trailer!");
++            let original = bytes.clone();
++            let inspection = inspect_image(&bytes).unwrap_or_else(|e| panic!("{format:?}: {e}"));
++            assert_eq!(inspection.content_type, mime);
++            assert_eq!((inspection.width, inspection.height), (8, 8));
++            assert_eq!(bytes, original);
++        }
++    }
++
++    #[test]
++    fn webp_declared_boundary_cannot_use_bytes_outside_riff() {
++        let good = still_image(image::ImageFormat::WebP);
++        assert_eq!(inspect_image(&good).unwrap().content_type, "image/webp");
++        assert!(inspect_image(&good[..good.len() - 1]).is_err());
++        let mut short_boundary = good;
++        short_boundary[4..8].copy_from_slice(&4u32.to_le_bytes());
++        assert!(inspect_image(&short_boundary).is_err());
++        short_boundary[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
++        assert!(inspect_image(&short_boundary).is_err());
++    }
++
++    #[test]
++    fn animated_webp_keeps_all_frames_with_appended_data() {
++        let mut bytes = include_bytes!("../tests/fixtures/two-frame.webp").to_vec();
++        let plain = inspect_image(&bytes).unwrap();
++        assert_eq!(plain.frames, 2);
++        assert!(plain.animation_preserved);
++        bytes.extend_from_slice(b"extra-source-data");
++        let original = bytes.clone();
++        let inspected = inspect_image(&bytes).unwrap();
++        assert_eq!(inspected.frames, 2);
++        assert_eq!((inspected.width, inspected.height), (12, 8));
++        assert!(inspected.animation_preserved);
++        assert_eq!(bytes, original);
++    }
++
++    #[test]
++    fn gif_animation_and_real_trailer_are_checked_separately() {
++        let mut bytes = Vec::new();
++        {
++            let mut encoder = image::codecs::gif::GifEncoder::new(&mut bytes);
++            encoder
++                .encode_frames([
++                    image::Frame::new(image::RgbaImage::from_pixel(
++                        8,
++                        8,
++                        image::Rgba([0, 0, 0, 255]),
++                    )),
++                    image::Frame::new(image::RgbaImage::from_pixel(
++                        8,
++                        8,
++                        image::Rgba([255, 0, 0, 255]),
++                    )),
++                ])
++                .unwrap();
++        }
++        let complete_length = bytes.len();
++        assert_eq!(bytes.last(), Some(&b';'));
++        bytes.extend_from_slice(b"opaque-appended-data");
++        let result = inspect_image(&bytes).unwrap();
++        assert_eq!(result.frames, 2);
++        assert!(result.animation_preserved);
++
++        // A marker-shaped byte in a comment is not the stream's trailer.
++        let mut missing_trailer = bytes[..complete_length - 1].to_vec();
++        missing_trailer.extend_from_slice(&[0x21, 0xfe, 1, b';', 0]);
++        assert_eq!(
++            inspect_image(&missing_trailer).unwrap_err().to_string(),
++            "gif_trailer_missing"
++        );
++        // A truncated comment cannot be skipped just because it contains ';'.
++        missing_trailer.truncate(missing_trailer.len() - 1);
++        assert!(inspect_image(&missing_trailer).is_err());
++    }
++
++    fn jpeg() -> Vec<u8> {
++        let mut bytes = Cursor::new(vec![]);
++        image::DynamicImage::new_rgb8(8, 8)
++            .write_to(&mut bytes, image::ImageFormat::Jpeg)
++            .unwrap();
++        bytes.into_inner()
++    }
++
++    #[test]
++    fn jpeg_with_trailing_data_decodes_without_changing_source_bytes() {
++        let mut bytes = jpeg();
++        let checksum = <md5::Md5 as md5::Digest>::digest(&bytes);
++        bytes.extend_from_slice(&0x12345678u64.to_le_bytes());
++        bytes.extend_from_slice(&checksum);
++        let original = bytes.clone();
++        let inspected = inspect_image(&bytes).unwrap();
++        assert_eq!(inspected.content_type, "image/jpeg");
++        assert_eq!(
++            (inspected.width, inspected.height, inspected.frames),
++            (8, 8, 1)
++        );
++        assert_eq!(bytes, original);
++    }
++
++    #[test]
++    fn progressive_jpeg_multiple_scans_allow_trailing_data() {
++        let mut bytes = include_bytes!("../tests/fixtures/progressive.jpg").to_vec();
++        bytes.extend_from_slice(b"synthetic-photo-trailer!");
++        let inspected = inspect_image(&bytes).unwrap();
++        assert_eq!((inspected.width, inspected.height), (16, 12));
++        assert_eq!(inspected.content_type, "image/jpeg");
++        let end = bytes.len() - 24 - 2;
++        assert!(!jpeg_has_end_marker(&bytes[..end]));
++    }
++
++    #[test]
++    fn jpeg_end_marker_inside_metadata_does_not_hide_truncation() {
++        let image = jpeg();
++        let mut bytes = vec![0xff, 0xd8, 0xff, 0xfe, 0, 6, 0x11, 0xff, 0xd9, 0x22];
++        bytes.extend_from_slice(&image[2..]);
++        assert!(inspect_image(&bytes).is_ok());
++        bytes.truncate(bytes.len() - 2);
++        assert_eq!(
++            inspect_image(&bytes).unwrap_err().to_string(),
++            "jpeg_trailer_missing"
++        );
++        bytes[4..6].copy_from_slice(&u16::MAX.to_be_bytes());
++        bytes.extend_from_slice(&[0xff, 0xd9]);
++        assert!(!jpeg_has_end_marker(&bytes));
++    }
++
++    #[test]
++    fn jpeg_scan_stuffing_and_restart_markers_are_not_end_markers() {
++        let bytes = [
++            0xff, 0xd8, 0xff, 0xda, 0, 2, 7, 0xff, 0, 0xd9, 0xff, 0xd0, 9, 0xff,
++        ];
++        assert!(!jpeg_has_end_marker(&bytes));
++        let mut complete = bytes.to_vec();
++        complete.push(0xd9);
++        assert!(jpeg_has_end_marker(&complete));
++    }
++}
+diff --git a/packages/native-client-rust/crates/wechat-protocol/src/sticker.rs b/packages/native-client-rust/crates/wechat-protocol/src/sticker.rs
+index c99b4a6..13949d2 100644
+--- a/packages/native-client-rust/crates/wechat-protocol/src/sticker.rs
++++ b/packages/native-client-rust/crates/wechat-protocol/src/sticker.rs
+@@ -1,12 +1,12 @@
+ //! Original type-47 bytes from the verified CDN host. Signed URLs remain private.
+-use anyhow::{ensure, Result};
++use anyhow::{Result, ensure};
+ use serde::{Deserialize, Serialize};
+ use std::{
+     io::Read,
+     net::{IpAddr, ToSocketAddrs},
+     time::Duration,
+ };
+-pub use wechat_media::{inspect_image, ImageInspection};
++pub use wechat_media::{ImageInspection, inspect_image};
+ #[derive(Clone, Serialize, Deserialize)]
+ pub struct StickerDescriptor {
+     pub url: String,
+@@ -30,11 +30,15 @@ pub(super) fn public_ip(ip: IpAddr) -> bool {
+     }
+ }
+ /// Sticker bytes come from Tencent CDN hosts. Classic stored and pack emoji
+-/// carry a `wxapp.tc.qq.com` source, while shared stickers use
+-/// `snsvideo.c2c.wechat.com`; both are reachable directly, unlike the
+-/// encrypted attachment channels. Any other host stays refused so a crafted
++/// carry a `wxapp.tc.qq.com` source, while shared stickers can use
++/// `snsvideo.c2c.wechat.com` or `vweixinf.tc.qq.com`.
++/// Any other host stays refused so a crafted
+ /// message cannot turn this into an arbitrary fetch.
+-pub const STICKER_HOSTS: &[&str] = &["snsvideo.c2c.wechat.com", "wxapp.tc.qq.com"];
++pub const STICKER_HOSTS: &[&str] = &[
++    "snsvideo.c2c.wechat.com",
++    "vweixinf.tc.qq.com",
++    "wxapp.tc.qq.com",
++];
+ 
+ pub fn validate_sticker_url(value: &str) -> Result<reqwest::Url> {
+     ensure!(
+@@ -152,11 +156,13 @@ pub fn fetch_sticker(
+ mod tests {
+     use super::*;
+     #[test]
+-    fn both_receiving_transports_are_allowed() {
++    fn official_receiving_hosts_are_allowed() {
+         for u in [
+             "https://snsvideo.c2c.wechat.com/x",
+             "http://wxapp.tc.qq.com/275/20304/stodownload?m=318341a160b08b297892a0e5741cc553&filekey=3035020101042130&bizid=1023",
+             "https://wxapp.tc.qq.com:443/x",
++            "https://vweixinf.tc.qq.com:443/100/20350/stodownload",
++            "http://vweixinf.tc.qq.com/100/20350/stodownload",
+         ] {
+             assert!(validate_sticker_url(u).is_ok(), "{u}");
+         }
+@@ -165,6 +171,8 @@ mod tests {
+             "https://wxapp.tc.qq.com.cn/x",
+             "http://evil.tc.qq.com/x",
+             "http://wxapp.tc.qq.com:8080/x",
++            "https://vweixinf.tc.qq.com.evil/x",
++            "https://vweixinf.tc.qq.com:8080/x",
+         ] {
+             assert!(validate_sticker_url(u).is_err(), "{u}");
+         }
+diff --git a/packages/native-client-rust/crates/wechat-store/Cargo.toml b/packages/native-client-rust/crates/wechat-store/Cargo.toml
+index f121945..c5a4a8d 100644
+--- a/packages/native-client-rust/crates/wechat-store/Cargo.toml
++++ b/packages/native-client-rust/crates/wechat-store/Cargo.toml
+@@ -13,7 +13,8 @@ anyhow.workspace = true
+ serde.workspace = true
+ serde_json.workspace = true
+ schemars.workspace = true
+-rusqlite.workspace = true
++rusqlite = { workspace = true, features = ["hooks"] }
++tokio = { workspace = true, features = ["sync"] }
+ sha2.workspace = true
+ uuid.workspace = true
+ tempfile.workspace = true
+diff --git a/packages/native-client-rust/crates/wechat-store/src/account_removal.rs b/packages/native-client-rust/crates/wechat-store/src/account_removal.rs
+index 9eccb95..610ca84 100644
+--- a/packages/native-client-rust/crates/wechat-store/src/account_removal.rs
++++ b/packages/native-client-rust/crates/wechat-store/src/account_removal.rs
+@@ -44,7 +44,12 @@ impl Store {
+             "UPDATE account_settings SET alias=NULL WHERE account_id=?1",
+             [account],
+         )?;
++        let mut subscribers = self
++            .event_subscribers
++            .lock()
++            .map_err(|_| anyhow::anyhow!("event subscriptions unavailable"))?;
+         tx.commit()?;
++        subscribers.remove(account);
+         Ok(())
+     }
+ }
+diff --git a/packages/native-client-rust/crates/wechat-store/src/lib.rs b/packages/native-client-rust/crates/wechat-store/src/lib.rs
+index abeb4f5..9c1e88c 100644
+--- a/packages/native-client-rust/crates/wechat-store/src/lib.rs
++++ b/packages/native-client-rust/crates/wechat-store/src/lib.rs
+@@ -33,10 +33,12 @@ use serde::{Deserialize, Serialize};
+ pub use settings::AccountSettings;
+ use sha2::{Digest, Sha256};
+ use std::{
++    collections::HashMap,
+     fs::{self, File},
+     path::{Path, PathBuf},
+     sync::{Arc, Mutex},
+ };
++use tokio::sync::watch;
+ 
+ pub struct Lease(Vec<File>);
+ 
+@@ -153,6 +155,7 @@ pub struct Store {
+     pub server_id: String,
+     db: Mutex<Connection>,
+     admitted: Mutex<admission::AdmissionCache>,
++    event_subscribers: Mutex<HashMap<String, watch::Sender<()>>>,
+     _lease: Arc<Lease>,
+     snapshot: Option<(String, Mutex<Connection>)>,
+ }
+@@ -193,6 +196,7 @@ impl Store {
+             server_id,
+             db: Mutex::new(db),
+             admitted: Mutex::new(Default::default()),
++            event_subscribers: Mutex::new(Default::default()),
+             _lease: Arc::new(lease),
+             snapshot: None,
+         })
+diff --git a/packages/native-client-rust/crates/wechat-store/src/operations.rs b/packages/native-client-rust/crates/wechat-store/src/operations.rs
+index 3156515..7e760d4 100644
+--- a/packages/native-client-rust/crates/wechat-store/src/operations.rs
++++ b/packages/native-client-rust/crates/wechat-store/src/operations.rs
+@@ -1,7 +1,10 @@
+ use super::*;
+ use rusqlite::OptionalExtension;
+ use serde_json::Value;
+-use std::time::{SystemTime, UNIX_EPOCH};
++use std::{
++    sync::atomic::{AtomicBool, Ordering},
++    time::{SystemTime, UNIX_EPOCH},
++};
+ #[path = "logout.rs"]
+ mod logout;
+ 
+@@ -245,8 +248,33 @@ impl Store {
+             ACCOUNT_SCHEMA_VERSION,
+             Self::prepare_account,
+         )?;
++        let notification = self
++            .event_subscribers
++            .lock()
++            .map_err(|_| anyhow::anyhow!("event subscriptions unavailable"))?
++            .get(id)
++            .cloned();
++        let events_changed = Arc::new(AtomicBool::new(false));
++        if notification.is_some() {
++            let changed = events_changed.clone();
++            db.update_hook(Some(move |action, database: &str, table: &str, _row: i64| {
++                if action == rusqlite::hooks::Action::SQLITE_INSERT
++                    && database == "main"
++                    && table == "events"
++                {
++                    changed.store(true, Ordering::Release);
++                }
++            }));
++        }
+         let result = f(&mut db);
+-        db.close().map_err(|(_, error)| error)?;
++        let closed = db.close().map_err(|(_, error)| error);
++        // Wake readers after the connection closes, including partially
++        // successful operations. They replay the log, so a rolled-back insert
++        // can only cause an empty read.
++        if let Some(notification) = notification.filter(|_| events_changed.load(Ordering::Acquire)) {
++            notification.send_replace(());
++        }
++        closed?;
+         if result.is_ok() {
+             crate::admission::remember(&mut admitted, &path)?;
+         }
+@@ -397,6 +425,27 @@ impl Store {
+             Ok(rows.collect::<rusqlite::Result<_>>()?)
+         })
+     }
++    /// Subscribe before reading a live account's event log to observe concurrent commits.
++    pub fn subscribe_events(&self, id: &str) -> Result<watch::Receiver<()>> {
++        anyhow::ensure!(
++            self.snapshot.is_none(),
++            "event subscriptions require a live store"
++        );
++        let registry = self
++            .db
++            .lock()
++            .map_err(|_| anyhow::anyhow!("registry lock poisoned"))?;
++        Self::require_registered(&registry, id)?;
++        let mut subscribers = self
++            .event_subscribers
++            .lock()
++            .map_err(|_| anyhow::anyhow!("event subscriptions unavailable"))?;
++        subscribers.retain(|_, sender| sender.receiver_count() > 0);
++        let sender = subscribers
++            .entry(id.to_owned())
++            .or_insert_with(|| watch::channel(()).0);
++        Ok(sender.subscribe())
++    }
+     pub fn append_event(&self, id: &str, kind: &str, data: &Value) -> Result<Event> {
+         self.control(id, |db| {
+             let tx = db.transaction()?;
+diff --git a/packages/native-client-rust/crates/wechat-store/src/read_snapshot.rs b/packages/native-client-rust/crates/wechat-store/src/read_snapshot.rs
+index d79840b..6b15d7a 100644
+--- a/packages/native-client-rust/crates/wechat-store/src/read_snapshot.rs
++++ b/packages/native-client-rust/crates/wechat-store/src/read_snapshot.rs
+@@ -44,6 +44,7 @@ impl Store {
+             server_id: self.server_id.clone(),
+             db: Mutex::new(db),
+             admitted: Mutex::new(Default::default()),
++            event_subscribers: Mutex::new(Default::default()),
+             _lease: self._lease.clone(),
+             snapshot: Some((account.into(), Mutex::new(control))),
+         })

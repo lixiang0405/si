@@ -1,0 +1,28 @@
+[Unit]
+Description=Si AstrBot
+Wants=network-online.target
+After=network-online.target sibot-wechat.service sibot-game.service
+
+[Service]
+Type=simple
+User=sibot
+Group=sibot
+WorkingDirectory=/srv/sibot/work/astrbot-instance
+Environment=HOME=/srv/sibot/home
+Environment=ASTRBOT_ROOT=/srv/sibot/work/astrbot-instance
+Environment=DASHBOARD_HOST=127.0.0.1
+Environment=DASHBOARD_PORT=6185
+Environment=TZ=Asia/Shanghai
+Environment=PYTHONUTF8=1
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/srv/sibot/bin:/srv/sibot/home/.local/bin:/srv/sibot/venv/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-/srv/sibot/state/secrets/qoder.env
+UMask=0077
+NoNewPrivileges=true
+ExecStart=/srv/sibot/venv/bin/python -m astrbot.cli run
+Restart=on-failure
+RestartSec=8s
+TimeoutStopSec=25s
+
+[Install]
+WantedBy=multi-user.target

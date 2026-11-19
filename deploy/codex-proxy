@@ -1,0 +1,12 @@
+#!/bin/sh
+
+proxy=http://127.0.0.1:10808
+export http_proxy="$proxy" https_proxy="$proxy" all_proxy="$proxy"
+export HTTP_PROXY="$proxy" HTTPS_PROXY="$proxy" ALL_PROXY="$proxy"
+export no_proxy=localhost,127.0.0.1,::1
+export NO_PROXY="$no_proxy"
+
+if [ "${1-}" = exec ]; then
+    exec /srv/sibot/bin/codex --no-daemon "$@"
+fi
+exec /srv/sibot/bin/codex "$@"

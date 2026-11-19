@@ -1,0 +1,117 @@
+{
+  "model_id": {
+    "description": "Qoder 模型 ID",
+    "type": "string",
+    "default": "dfmodel",
+    "hint": "dfmodel 是 Qoder 中国区的 DeepSeek-Flash。其他模型请填写 Qoder 模型目录中的 ID。"
+  },
+  "effort": {
+    "description": "推理档位",
+    "type": "string",
+    "default": "max",
+    "options": ["default", "none", "low", "medium", "high", "xhigh", "max"],
+    "hint": "选择模型支持的档位。default 使用模型自己的默认档位。"
+  },
+  "context_window": {
+    "description": "Qoder 上下文窗口",
+    "type": "int",
+    "default": 1000000,
+    "hint": "填写模型支持的 Token 档位。填 0 使用模型默认值。"
+  },
+  "enable_web_search": {
+    "description": "联网查资料",
+    "type": "bool",
+    "default": true,
+    "hint": "让祀在被要求查资料、需要核对新信息或看不准图片时使用 Qoder 的网页搜索、按关键词搜图和公开网页读取。"
+  },
+  "enable_wechat_local_stt": {
+    "description": "本机转写微信语音",
+    "type": "bool",
+    "default": false,
+    "hint": "对 WeChat Native 收到的语音使用本机 SenseVoice。需安装 sherpa-onnx，并在插件数据目录 sensevoice 内放入 model.int8.onnx 与 tokens.txt。已有 AstrBot 转写文字会继续使用。"
+  },
+  "enable_codex_subscription": {
+    "description": "允许选择本机 Codex 订阅模型",
+    "type": "bool",
+    "default": false,
+    "hint": "使用运行 AstrBot 的 Windows 用户在 Codex CLI 保存的 ChatGPT 登录。由模型管理员在聊天内切换。"
+  },
+  "enable_feedback_codex": {
+    "description": "用 Codex 执行已批准的反馈工单",
+    "type": "bool",
+    "default": false,
+    "hint": "使用 AstrBot 服务账号的 Codex 登录。已绑定好友私聊可批准或继续修复。源码权限由工单工作目录和额外授权目录决定。"
+  },
+  "enable_wechat_local_codex": {
+    "description": "允许微信私聊管理员使用本机 Codex",
+    "type": "bool",
+    "default": false,
+    "hint": "还需启用本机 Codex 订阅。已绑定管理员在微信私聊发送 /电脑 加任务，或切换 Codex 后直接发任务。Codex 使用运行 AstrBot 的 Windows 账户权限访问本机文件并执行命令。"
+  },
+  "enable_qq_local_codex": {
+    "description": "允许个人 QQ 私聊管理员使用本机 Codex",
+    "type": "bool",
+    "default": false,
+    "hint": "还需启用本机 Codex 订阅。只对 NapCat 接入的个人 QQ 好友私聊开放，身份以该适配器绑定的模型管理员为准。"
+  },
+  "qoder_use_system_proxy": {
+    "description": "Qoder 使用系统代理",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后仅此插件的 Qoder API 和出图下载走直连。QQ、微信及 Codex 各自使用原有连接设置。"
+  },
+  "codex_executable": {
+    "description": "Codex CLI 路径",
+    "type": "string",
+    "default": "",
+    "hint": "留空自动查找 PATH 和 Windows 桌面版自带的 Codex CLI。"
+  },
+  "feedback_workspace": {
+    "description": "反馈任务的源码目录",
+    "type": "string",
+    "default": "",
+    "hint": "填绝对路径。留空使用 AstrBot 运行目录旁的 astrbot_plugin_qoder_neko 源码目录。获批工单在该目录修改和测试。"
+  },
+  "feedback_project_source_dirs": {
+    "description": "反馈工单默认可写的其他项目源码",
+    "type": "list",
+    "default": [],
+    "hint": "填绝对路径。获批工单可修改这些源码目录，例如微信适配器、WeChat Native 和小游戏源码。"
+  },
+  "enable_group_reminders": {
+    "description": "群待办与定时提醒",
+    "type": "bool",
+    "default": true,
+    "hint": "在个人 QQ 与已放行的微信群接受一次性和周期提醒，按北京时间保存。到点在原群 @ 提醒对象。"
+  },
+  "enable_group_game_rooms": {
+    "description": "群网页棋牌室",
+    "type": "bool",
+    "default": false,
+    "hint": "启动本机的祀棋牌室后，可在个人 QQ 群和已放行的微信群发 /德州 开桌、/川麻 开桌 或 /三国杀 开桌。原群只收一次链接和最终结算。"
+  },
+  "reply_to_all_group_messages": {
+    "description": "回复所有群消息",
+    "type": "bool",
+    "default": false,
+    "hint": "开启时，已接入的微信群消息逐条触发，无需 @。QQ 群使用单独的「QQ 群随机接话概率」。"
+  },
+  "mention_only_groups": {
+    "description": "仅被真正 @ 时接话的群",
+    "type": "list",
+    "default": [],
+    "hint": "每项填写 平台实例ID:群ID。微信使用以 @chatroom 结尾的房间 ID。这些群仍可提交 /反馈。"
+  },
+  "qq_group_reply_chance": {
+    "description": "QQ 群随机接话概率",
+    "type": "int",
+    "default": 20,
+    "hint": "普通群消息触发回复的百分比。0 表示不主动接话，100 表示每条参与抽样的消息都会触发。实际 @ 祀、开头写 @祀 和功能指令可直接触发。"
+  },
+  "remember_group_jokes": {
+    "description": "记住本群的梗和外号",
+    "type": "bool",
+    "default": true,
+    "hint": "后台整理并在本机按群保存常用梗和外号，最多 64 条。关闭后停止整理和调用。"
+  }
+}

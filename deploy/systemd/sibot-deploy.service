@@ -1,0 +1,23 @@
+[Unit]
+Description=SiBot approved feedback host publisher
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=sibot
+WorkingDirectory=/srv/sibot
+EnvironmentFile=-/etc/si-game-https/public-host.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+UnsetEnvironment=HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+ExecStart=/srv/sibot/venv/bin/python -B /srv/sibot/outputs/SiBotHostDeploy.py
+Restart=always
+RestartSec=3s
+KillMode=control-group
+TimeoutStopSec=35s
+UMask=0007
+
+[Install]
+WantedBy=multi-user.target

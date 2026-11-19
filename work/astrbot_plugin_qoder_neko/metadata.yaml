@@ -1,0 +1,11 @@
+name: astrbot_plugin_qoder_neko
+display_name: Qoder 祀
+desc: 通过 Qoder Cloud Agents 或本机 Codex 在 QQ 和微信上和《明日方舟：终末地》的祀对话。
+version: v1.10.17
+author: Codex
+astrbot_version: '>=4.29.4,<5'
+support_platforms:
+  - qq_official
+  - qq_official_webhook
+  - aiocqhttp
+  - wechat_native

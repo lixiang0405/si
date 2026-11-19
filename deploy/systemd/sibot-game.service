@@ -1,0 +1,21 @@
+[Unit]
+Description=Si local game room
+After=network.target
+
+[Service]
+Type=simple
+User=sibot
+Group=sibot
+WorkingDirectory=/srv/sibot/work/si-game-room
+Environment=HOME=/srv/sibot/home
+Environment=TZ=Asia/Shanghai
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/etc/si-game-https/public-host.env
+UMask=0077
+NoNewPrivileges=true
+ExecStart=/srv/sibot/venv/bin/python -B server.py --host 127.0.0.1 --port 8765 --bridge-port 8766 --public-origin https://${SI_GAME_HTTPS_HOST} --behind-proxy
+Restart=on-failure
+RestartSec=6s
+
+[Install]
+WantedBy=multi-user.target

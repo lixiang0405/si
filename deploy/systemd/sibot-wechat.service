@@ -1,0 +1,21 @@
+[Unit]
+Description=Si WeChat Native
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=sibot
+Group=sibot
+WorkingDirectory=/srv/sibot/state/wechat
+Environment=HOME=/srv/sibot/home
+Environment=TZ=Asia/Shanghai
+UMask=0077
+NoNewPrivileges=true
+ExecStart=/srv/sibot/bin/wx serve --listen 127.0.0.1:6175 --data-dir /srv/sibot/state/wechat
+Restart=on-failure
+RestartSec=8s
+TimeoutStopSec=25s
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#141917">
+  <title>缘缘庄牌桌</title>
+  <script id="room-bootstrap">
+    document.addEventListener("DOMContentLoaded", () => {
+      const connection = document.querySelector("#connection");
+      function loadScript(attempt = 0) {
+        const script = document.createElement("script");
+        script.src = `/assets/app.js?load=${attempt}`;
+        script.onerror = () => {
+          script.remove();
+          connection.textContent = attempt < 4 ? "正在重试加载" : "请点击重新加载";
+          if (attempt < 4) setTimeout(() => loadScript(attempt + 1), 750 * (attempt + 1));
+        };
+        document.head.append(script);
+      }
+      const style = document.querySelector("#room-style");
+      function loadStyle(attempt = 0) {
+        if (style.sheet) return;
+        style.onerror = () => {
+          if (attempt < 4) setTimeout(() => loadStyle(attempt + 1), 750 * (attempt + 1));
+        };
+        style.href = `/assets/site.css?load=${attempt}`;
+      }
+      loadStyle();
+      loadScript();
+    }, { once: true });
+  </script>
+  <link id="room-style" rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">祀</span>
+        <span>缘缘庄</span>
+      </div>
+      <div class="topbar-meta">
+        <span id="top-room" class="room-mark" hidden></span>
+        <span id="connection" class="connection" data-status="waiting" role="status">连接中</span>
+      </div>
+    </div>
+  </header>
+  <main id="app" class="shell">
+    <section class="initial panel">
+      <h1>正在入桌</h1>
+      <p>正在读取牌桌资料，连接不稳时会自动重试。</p>
+      <p><a href="">重新加载牌桌</a></p>
+    </section>
+  </main>
+  <div id="notice" class="notice" role="status" hidden></div>
+</body>
+</html>

@@ -1,0 +1,28 @@
+[Unit]
+Description=Si QQ NapCat
+Wants=network-online.target
+After=network-online.target sibot-astrbot.service
+
+[Service]
+User=siqq
+Group=siqq
+WorkingDirectory=/srv/siqq/home
+Environment=HOME=/srv/siqq/home
+Environment=TZ=Asia/Shanghai
+UMask=0077
+ExecStart=/usr/bin/xvfb-run -a /srv/siqq/qq-linux/opt/QQ/qq --no-sandbox --disable-gpu
+Restart=on-failure
+RestartSec=8s
+TimeoutStopSec=20s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/siqq/home /srv/siqq/config /srv/siqq/logs /srv/siqq/cache /srv/siqq/plugins
+ProtectKernelTunables=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

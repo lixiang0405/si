@@ -1,0 +1,8 @@
+{
+  "views": {
+    "connection": {
+      "title": "WeChat Native 面板",
+      "description": "查看连接状态、每日消息统计与配置概览。"
+    }
+  }
+}
