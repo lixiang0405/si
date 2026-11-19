@@ -22,6 +22,10 @@ curl -fsS "https://$GAME_HOST/ready"
 
 安装器创建 `sibot` 系统账号、Python 3.12 虚拟环境、插件源码和运行副本，安装并启动 AstrBot、牌桌和 Caddy。它为面板和 OneBot 生成独立随机口令。公网探针应返回 HTTP 200。首次签发证书时可用 `sudo journalctl -u sibot-game-https -n 50` 查看进度。首页要求邀请，直接打开根地址返回 403 是预期行为。
 
+若云机连接 GitHub 超时，可先在自己的电脑克隆仓库，执行 `git -C si-group-bot bundle create ../si-group-bot.bundle main`，再用 `scp si-group-bot.bundle ubuntu@服务器地址:~/` 传到服务器。在服务器家目录执行 `git clone -b main ./si-group-bot.bundle si-group-bot`，再执行 `git -C si-group-bot remote set-url origin https://github.com/lixiang0405/si-group-bot.git`。用 `git -C si-group-bot rev-parse HEAD` 核对两端提交。
+
+如果 pip 卡在大文件下载，可为本次安装指定可达的 PyPI 镜像。例如在腾讯云的 Bash 中执行 `sudo env PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple bash deploy/install-ubuntu.sh "$GAME_HOST"`。安装器仍使用仓库内的 Ubuntu/Python 版本约束。
+
 设置 Qoder 的服务凭据，每行写一个 systemd 环境变量，例如 `QODER_ACCESS_TOKEN=你的令牌`。
 
 ```bash
@@ -161,6 +165,6 @@ sudo journalctl -u sibot-game-https -u sibot-deploy -n 50 --no-pager
 /srv/sibot/venv/bin/python -B work/si-game-room-source/deploy.py --check
 ```
 
-首个公开版本在 Ubuntu 24.04 的空数据目录完成了两次初始化、两个插件的实际加载、面板 HTTP 200 和本地邀请入座检查。16 项发布器测试、99 项游戏测试通过，游戏测试包含德州、川麻和八种三国杀桌型各一场完整对局。私人账号的扫码和手机收发需要由部署者在自己的环境验收。
+首个公开版本在 Ubuntu 24.04 的全新 Python 3.12 虚拟环境安装了 AstrBot 4.29.4 和两份插件依赖，`pip check` 通过。空数据目录完成了重复初始化、两个插件的实际加载、面板 HTTP 200 和本地邀请入座检查。16 项发布器测试、99 项游戏测试通过，游戏测试包含德州、川麻和八种三国杀桌型各一场完整对局。私人账号的扫码和手机收发需要由部署者在自己的环境验收。
 
 自有代码按 MIT 发布。依赖、补丁和同人素材的具体来源见[第三方说明](THIRD_PARTY.md)和[项目许可证](LICENSE)。
