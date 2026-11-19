@@ -1,4 +1,4 @@
-# 祀 · QQ / 微信群机器人
+# 祀
 
 祀是一个基于 AstrBot 的中文群聊机器人。它在 QQ 和微信里接话、认图、收发文件，按群分别记住梗和外号，也能定时提醒群友。发 `/德州 开桌`、`/川麻 开桌` 或 `/三国杀 开桌`，群友就能在手机浏览器里共用一桌。群反馈可经绑定管理员批准，交给 Codex 修改源码，再由管理员确认发布。
 
@@ -11,8 +11,8 @@
 ```bash
 sudo apt-get update
 sudo apt-get install -y git
-git clone https://github.com/lixiang0405/si-group-bot.git
-cd si-group-bot
+git clone https://github.com/lixiang0405/si.git
+cd si
 read -rp '牌桌域名，例如 play.example.org：' GAME_HOST
 getent ahostsv4 "$GAME_HOST"
 sudo bash deploy/install-ubuntu.sh "$GAME_HOST"
@@ -22,7 +22,7 @@ curl -fsS "https://$GAME_HOST/ready"
 
 安装器创建 `sibot` 系统账号、Python 3.12 虚拟环境、插件源码和运行副本，安装并启动 AstrBot、牌桌和 Caddy。它为面板和 OneBot 生成独立随机口令。公网探针应返回 HTTP 200。首次签发证书时可用 `sudo journalctl -u sibot-game-https -n 50` 查看进度。首页要求邀请，直接打开根地址返回 403 是预期行为。
 
-若云机连接 GitHub 超时，可先在自己的电脑克隆仓库，执行 `git -C si-group-bot bundle create ../si-group-bot.bundle main`，再用 `scp si-group-bot.bundle ubuntu@服务器地址:~/` 传到服务器。在服务器家目录执行 `git clone -b main ./si-group-bot.bundle si-group-bot`，再执行 `git -C si-group-bot remote set-url origin https://github.com/lixiang0405/si-group-bot.git`。用 `git -C si-group-bot rev-parse HEAD` 核对两端提交。
+若云机连接 GitHub 超时，可先在自己的电脑克隆仓库，执行 `git -C si bundle create ../si.bundle main`，再用 `scp si.bundle ubuntu@服务器地址:~/` 传到服务器。在服务器家目录执行 `git clone -b main ./si.bundle si`，再执行 `git -C si remote set-url origin https://github.com/lixiang0405/si.git`。用 `git -C si rev-parse HEAD` 核对两端提交。
 
 如果 pip 卡在大文件下载，可为本次安装指定可达的 PyPI 镜像。例如在腾讯云的 Bash 中执行 `sudo env PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple bash deploy/install-ubuntu.sh "$GAME_HOST"`。安装器仍使用仓库内的 Ubuntu/Python 版本约束。
 
